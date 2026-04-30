@@ -302,38 +302,60 @@ def chat_handler(user_message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Streamlit UI — wired up in Phase 4; minimal scaffold here
+# Streamlit UI
 # ---------------------------------------------------------------------------
-if __name__ == "__main__" or True:
-    st.set_page_config(page_title="Meridian Support", page_icon="🖥️")
+st.set_page_config(
+    page_title="Meridian Electronics Support",
+    page_icon="🖥️",
+    layout="centered",
+)
 
-    try:
-        config.validate()
-    except ValueError as e:
-        st.error(str(e))
-        st.stop()
+# Validate config — show clear error and stop if env vars are missing
+try:
+    config.validate()
+except ValueError as e:
+    st.error(f"⚠️ Configuration error: {e}")
+    st.info("Copy `.env.example` to `.env`, fill in your credentials, and restart.")
+    st.stop()
 
-    init_session()
+init_session()
 
-    st.title("🖥️ Meridian Electronics Support")
-    st.caption("Ask me about products, place orders, or check your order history.")
+# Header
+st.title("🖥️ Meridian Electronics Support")
+st.caption(
+    "I can help you check product availability, place orders, "
+    "and look up your order history."
+)
 
-    if not st.session_state.mcp_available:
-        st.error("Support services are temporarily unavailable. Please try again later.")
-        st.stop()
+# Auth status badge
+if st.session_state.authenticated:
+    st.success(f"✅ Authenticated — Customer {st.session_state.customer_id or ''}", icon=None)
 
-    # Render conversation history
-    for msg in st.session_state.messages:
-        if msg["role"] in ("user", "assistant"):
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+st.divider()
 
-    # Chat input
-    if prompt := st.chat_input("How can I help you today?"):
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# MCP unavailable banner
+if not st.session_state.mcp_available:
+    st.error(
+        "⚠️ Support services are temporarily unavailable. Please try again later."
+    )
+    st.stop()
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+# Render conversation history
+for msg in st.session_state.messages:
+    if msg["role"] in ("user", "assistant"):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# Chat input
+if prompt := st.chat_input("How can I help you today?"):
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
                 response = chat_handler(prompt)
-            st.markdown(response)
+            except Exception as e:
+                print(f"[APP ERROR] {e}", file=sys.stderr)
+                response = "Something went wrong. Please refresh and try again."
+        st.markdown(response)
