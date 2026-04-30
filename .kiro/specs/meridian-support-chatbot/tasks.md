@@ -66,7 +66,7 @@
     - On any unhandled exception: print `[APP ERROR] {e}` to stderr, return `"Something went wrong. Please try again."`
     - _Requirements: 7.3, 7.4, 7.5, 8.1, 8.3_
 
-- [ ] 3. Phase 3 — Four core workflows (90–120 min)
+- [-] 3. Phase 3 — Four core workflows (90–120 min)
 
   - [ ] 3.1 Verify authentication flow end-to-end
     - Run app locally, trigger auth by asking for order history
@@ -92,15 +92,15 @@
     - Confirm unauthenticated request is blocked
     - _Requirements: 6.1, 6.2, 6.3, 6.4_
 
-- [ ] 4. Phase 4 — UI polish and README (120–150 min)
+- [x] 4. Phase 4 — UI polish and README (120–150 min)
 
-  - [ ] 4.1 Polish Streamlit UI
+  - [x] 4.1 Polish Streamlit UI
     - Add page title and a brief description of what the chatbot can do
     - Show a spinner (`st.spinner`) while the LLM is generating a response
     - If `st.session_state.mcp_available` is `False`, show `st.error()` banner and disable chat input
     - _Requirements: 1.1, 1.3, 2.4_
 
-  - [ ] 4.2 Write `README.md`
+  - [x] 4.2 Write `README.md`
     - Quick Start: clone repo, copy `.env.example` to `.env`, fill in values, `pip install -r requirements.txt`, `streamlit run app.py`
     - Document all env vars with expected values or sources
     - Include the HuggingFace Spaces deployment URL (fill in after deploy)
