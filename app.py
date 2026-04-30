@@ -1,4 +1,5 @@
 # app.py — Streamlit UI, LLM orchestration, chat handler
+import os
 import sys
 import json
 import re
@@ -501,8 +502,21 @@ h1, h2, h3 { color: #f0f6fc; }
 try:
     config.validate()
 except ValueError as e:
-    st.error(f"⚠️ Configuration error: {e}")
-    st.info("Copy `.env.example` to `.env`, fill in your credentials, and restart.")
+    st.error(f"Configuration error: {e}")
+    if os.getenv("SPACE_ID"):
+        st.info(
+            "This Space needs a **secret** named exactly `CEREBRAS_API_KEY`. "
+            "Open **Settings → Variables and secrets → New secret**, add it, "
+            "then **Factory reboot** (or push a new commit) so the app restarts."
+        )
+        st.markdown(
+            f"[Open this Space’s settings](https://huggingface.co/spaces/{os.getenv('SPACE_ID')}/settings)"
+        )
+    else:
+        st.info(
+            "Copy `.env.example` to `.env`, set `CEREBRAS_API_KEY`, and run again "
+            "(or pass `-e CEREBRAS_API_KEY=...` with Docker)."
+        )
     st.stop()
 
 init_session()

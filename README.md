@@ -71,7 +71,7 @@ Streamlit (app.py) → Cerebras chat + tools
 
 ## Deploying to Hugging Face Spaces
 
-Use **Docker** as the Space SDK (`sdk: docker`, `app_port: 8501` in this README). [Create a Space](https://huggingface.co/new-space), connect this repo, then **Settings → Variables and secrets** → add secret **`CEREBRAS_API_KEY`**. Optional: `CEREBRAS_MODEL`, `MCP_SERVER_URL`.
+Use **Docker** as the Space SDK (`sdk: docker`, `app_port: 8501` in this README). [Create a Space](https://huggingface.co/new-space), connect this repo, then **Settings → Variables and secrets → New secret**: name **`CEREBRAS_API_KEY`** (exact spelling), value = your Cerebras API key. Without it the app shows a configuration error. Then **Factory reboot** the Space (or trigger a rebuild) so the container picks up the secret. Optional secrets/variables: `CEREBRAS_MODEL`, `MCP_SERVER_URL`.
 
 **Files at repo root:** `Dockerfile`, `requirements.txt`, `README.md`, `streamlit_app.py`, `app.py`, `config.py`, `mcp_client.py`.
 
