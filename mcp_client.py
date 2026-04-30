@@ -1,26 +1,52 @@
 # mcp_client.py — MCP server connection, tool discovery, and tool execution
 import sys
-import asyncio
 import json
+import asyncio
+import threading
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.session import ClientSession
 import config
 
-# Module-level cache — populated once by connect()
-_tools: list[dict] = []
+# ---------------------------------------------------------------------------
+# Run async code safely from a sync context (works inside Streamlit's loop)
+# ---------------------------------------------------------------------------
+def _run_async(coro):
+    """
+    Run an async coroutine in a dedicated background thread with its own
+    event loop. This avoids conflicts with Streamlit's internal event loop.
+    """
+    result_holder = {}
+
+    def run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result_holder["result"] = loop.run_until_complete(coro)
+        except Exception as e:
+            result_holder["error"] = e
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join()
+
+    if "error" in result_holder:
+        raise result_holder["error"]
+    return result_holder["result"]
 
 
+# ---------------------------------------------------------------------------
+# connect — discover tools at startup
+# ---------------------------------------------------------------------------
 def connect() -> list[dict]:
     """
-    Connect to the MCP server, discover tools, and cache them.
+    Connect to the MCP server, discover tools.
     Returns a list of tool dicts: {name, description, inputSchema}.
     On failure prints to stderr and returns an empty list.
     """
     try:
-        tools = asyncio.run(_connect_async())
-        _tools.clear()
-        _tools.extend(tools)
-        return tools
+        return _run_async(_connect_async())
     except Exception as e:
         print(f"[MCP ERROR] connect failed: {e}", file=sys.stderr)
         return []
@@ -35,18 +61,23 @@ async def _connect_async() -> list[dict]:
             for tool in result.tools:
                 schema = {}
                 if tool.inputSchema:
-                    # inputSchema is already a dict from the SDK
-                    schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else tool.inputSchema.model_dump()
-                tool_dict = {
+                    schema = (
+                        tool.inputSchema
+                        if isinstance(tool.inputSchema, dict)
+                        else tool.inputSchema.model_dump()
+                    )
+                tools.append({
                     "name": tool.name,
                     "description": tool.description or "",
                     "inputSchema": schema,
-                }
-                tools.append(tool_dict)
+                })
                 print(f"[MCP] Discovered tool: {tool.name}")
             return tools
 
 
+# ---------------------------------------------------------------------------
+# call_tool — execute a single tool call
+# ---------------------------------------------------------------------------
 def call_tool(name: str, args: dict) -> tuple[bool, str]:
     """
     Call a tool on the MCP server.
@@ -54,7 +85,7 @@ def call_tool(name: str, args: dict) -> tuple[bool, str]:
     Returns (False, user_friendly_error) on any failure.
     """
     try:
-        result = asyncio.run(_call_tool_async(name, args))
+        result = _run_async(_call_tool_async(name, args))
         return (True, result)
     except Exception as e:
         print(f"[MCP ERROR] tool={name} error={e}", file=sys.stderr)
@@ -66,7 +97,6 @@ async def _call_tool_async(name: str, args: dict) -> str:
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, args)
-            # Extract text content from the result
             if result.content:
                 parts = []
                 for item in result.content:

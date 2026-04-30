@@ -1,7 +1,10 @@
 # app.py — Streamlit UI, LLM orchestration, chat handler
 import sys
 import json
+import re
+import uuid
 import streamlit as st
+from cerebras.cloud.sdk import Cerebras
 import config
 import mcp_client
 
@@ -11,13 +14,88 @@ import mcp_client
 AUTH_REQUIRED_TOOLS = {"list_orders", "get_order"}
 
 
+def _normalize_json_quotes_for_parse(s: str) -> str:
+    """Replace common Unicode quotes so JSON tool-call blobs parse reliably."""
+    for a, b in (
+        ("\u201c", '"'),
+        ("\u201d", '"'),
+        ("\u2018", "'"),
+        ("\u2019", "'"),
+        ("\u00ab", '"'),
+        ("\u00bb", '"'),
+    ):
+        s = s.replace(a, b)
+    return s
+
+
+_MERIDIAN_TEST_EMAIL = re.compile(
+    r"^[a-z0-9._%+-]+@example\.(net|com|org)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_meridian_demo_credentials(email: str, pin: str) -> bool:
+    """True when email/PIN match the MCP assessment test-account pattern."""
+    e = email.strip()
+    p = pin.strip()
+    if not _MERIDIAN_TEST_EMAIL.match(e):
+        return False
+    if not p.isdigit() or not (4 <= len(p) <= 8):
+        return False
+    return True
+
+
+def _verify_pin_args_are_placeholders(args: dict) -> bool:
+    """True if verify_customer_pin was given obvious template / filler values."""
+    email = str(args.get("email") or args.get("customer_email") or "").strip().lower()
+    pin = str(args.get("pin") or args.get("password") or "").strip().lower()
+    if not email or not pin:
+        return True
+    # Official Meridian MCP test customers (example.net / .com / .org + numeric PIN)
+    if _is_meridian_demo_credentials(email, pin):
+        return False
+    lone = {"email", "pin", "password", "none", "null", "n/a", "na", "xxx", "changeme"}
+    if email in lone or pin in lone:
+        return True
+    # Do not use "@example." / "example@" substring checks — they false-positive on
+    # real demo addresses like donaldgarcia@example.net.
+    needles = (
+        "your email",
+        "your pin",
+        "your_email",
+        "your_pin",
+        "youremail",
+        "yourpin",
+        "placeholder",
+        "test@test",
+        "dummy",
+        "fake@",
+        "sample@",
+    )
+    blob = f"{email} {pin}"
+    if any(n in blob for n in needles):
+        return True
+    if email.startswith("your ") or pin.startswith("your "):
+        return True
+    return False
+
+
+def _auth_placeholder_reply() -> str:
+    return (
+        "I still need a valid **email** and **PIN** to sign you in. Please send the "
+        "email on your Meridian account and your numeric PIN together (for example: "
+        "name@example.net and 1234). If you used placeholder text like \"your email\", "
+        "replace it with your real details."
+    )
+
+
 # ---------------------------------------------------------------------------
-# 2.1  init_session
+# init_session
 # ---------------------------------------------------------------------------
 def init_session():
     """Initialise st.session_state on first load."""
     if "messages" not in st.session_state:
-        st.session_state.messages = []          # list[dict] — {role, content}
+        st.session_state.messages = []      # list[dict] — {role, content}
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     if "customer_id" not in st.session_state:
@@ -29,49 +107,67 @@ def init_session():
 
 
 # ---------------------------------------------------------------------------
-# 2.2  build_system_prompt
+# build_system_prompt
 # ---------------------------------------------------------------------------
 def build_system_prompt() -> str:
     return """You are a helpful customer support assistant for Meridian Electronics, \
 a company that sells computer products including monitors, keyboards, printers, \
 networking gear, and accessories.
 
-You can help customers with the following workflows:
-1. Check product availability — use list_products, get_product, or search_products
-2. Place an order — use create_order (always confirm product and quantity with the customer first)
-3. Look up order history — use list_orders or get_order (requires authentication)
-4. Authenticate a returning customer — use get_customer to look up the account, \
-then verify_customer_pin to confirm identity
+You have backend tools for your own use. The customer must never hear tool names, \
+function names, JSON, or phrases like \"I will call the … tool\" — speak only as a \
+human support agent. Use tools proactively where appropriate:
+- list_products(category): list products, optionally filtered by category
+- get_product(sku): get details for a specific product by SKU
+- search_products(query): search products by name or keyword
+- get_customer(customer_id): look up a customer account
+- verify_customer_pin(email, pin): authenticate — only after the customer gives \
+real values; never use placeholders like \"your email\" or \"your pin\"
+- list_orders(customer_id): list orders for an authenticated customer
+- get_order(order_id): get details of a specific order
+- create_order(customer_id, items): place a new order
 
-Important rules:
-- Before returning any account-specific data (orders, customer details), \
-you MUST call verify_customer_pin to authenticate the customer. \
-If the conversation history already shows a successful authentication, skip re-authentication.
-- Before placing an order with create_order, confirm the product name/ID and quantity \
-with the customer and wait for their explicit confirmation.
-- Stay within the scope of Meridian Electronics product and order support. \
-Politely decline unrelated requests.
-- Be concise, friendly, and professional."""
+Behaviour rules:
+1. When a customer asks about products or stock, IMMEDIATELY call the appropriate \
+tool (list_products or search_products). Do NOT ask clarifying questions first — \
+just call the tool and present the results.
+2. When you receive a [Tool result], present the data directly and clearly. \
+Never ask the customer to repeat their question after receiving a tool result.
+3. For product listings, show: name, SKU, price, and stock quantity.
+4. For order history, show: order ID, date, items, and status.
+5. Before accessing account data (orders), call verify_customer_pin first. \
+If already authenticated in this session, skip re-authentication. For sign-in \
+requests, ask for customer ID (or email, if the tools use email) and PIN before \
+calling tools — do not guess IDs. Never call verify_customer_pin until the \
+customer has provided their actual email and PIN in the conversation. After each \
+tool result, respond in plain language; do not answer with only another tool call \
+or with raw JSON meant for tools.
+6. Before placing an order with create_order, collect a clear product identifier \
+(SKU preferred, or a specific product name the catalogue can resolve) and quantity. \
+Confirm SKU, quantity, and price with the customer and wait for explicit confirmation \
+before submitting. Never assume a product category the customer did not mention \
+(e.g. do not ask about a \"monitor\" unless they said monitor or display).
+7. Stay within Meridian Electronics product and order support scope.
+8. Be concise, friendly, and professional.
+9. Sign-in and account help: ask in plain language only — for example: \"To verify \
+it's you, please send the **email** on your Meridian account and your **account \
+PIN**.\" Never say you are calling a tool, invoking an API, or using JSON; never \
+quote verify_customer_pin, get_customer, or any other technical identifier aloud.
+10. Demo / test accounts for this environment use emails ending in @example.net, \
+@example.com, or @example.org with a numeric PIN (often four digits). When the \
+customer provides such an email and PIN in conversation, treat them as real \
+credentials and complete verification — do not reject them as placeholders.
+11. Vague order requests (e.g. \"I'd like to place an order\" with no item): reply \
+in neutral language — ask what they want to buy (product name or SKU) and how many. \
+If they only give a category or vague description, use search_products or \
+list_products to show options, then narrow to one SKU before create_order."""
 
 
 # ---------------------------------------------------------------------------
-# Helper — convert our tool dicts to the format each LLM provider expects
+# Tool schema conversion — OpenAI-compatible format (Cerebras uses this)
 # ---------------------------------------------------------------------------
-def _tools_for_gemini(tools: list[dict]) -> list[dict]:
-    """Convert MCP tool dicts to Gemini function declarations."""
-    declarations = []
-    for t in tools:
-        schema = t.get("inputSchema", {})
-        declarations.append({
-            "name": t["name"],
-            "description": t["description"],
-            "parameters": schema if schema else {"type": "object", "properties": {}},
-        })
-    return [{"function_declarations": declarations}]
-
-
-def _tools_for_openai(tools: list[dict]) -> list[dict]:
-    """Convert MCP tool dicts to OpenAI function tool format."""
+def _tools_for_cerebras(tools: list[dict]) -> list[dict]:
+    """Convert MCP tool dicts to OpenAI-compatible function tool format."""
     result = []
     for t in tools:
         schema = t.get("inputSchema", {})
@@ -86,95 +182,69 @@ def _tools_for_openai(tools: list[dict]) -> list[dict]:
     return result
 
 
-def _tools_for_anthropic(tools: list[dict]) -> list[dict]:
-    """Convert MCP tool dicts to Anthropic tool format."""
-    result = []
-    for t in tools:
-        schema = t.get("inputSchema", {})
-        result.append({
-            "name": t["name"],
-            "description": t["description"],
-            "input_schema": schema if schema else {"type": "object", "properties": {}},
-        })
-    return result
+# ---------------------------------------------------------------------------
+# call_llm — Cerebras (OpenAI-compatible)
+# ---------------------------------------------------------------------------
+def _trim_messages(messages: list[dict], max_turns: int = 6) -> list[dict]:
+    """
+    Keep only the most recent max_turns user/assistant/tool exchanges.
+    This prevents context length errors on models with small windows.
+    """
+    # Filter to only conversational roles (skip any stray system entries)
+    conv = [m for m in messages if m["role"] in ("user", "assistant", "tool")]
+    # Keep last max_turns * 2 entries (each turn = user + assistant/tool)
+    return conv[-(max_turns * 2):]
 
 
-# ---------------------------------------------------------------------------
-# 2.3  call_llm
-# ---------------------------------------------------------------------------
 def call_llm(messages: list[dict], tools: list[dict]) -> dict:
     """
-    Call the LLM synchronously.
+    Call Cerebras LLM synchronously.
     Returns {"type": "text", "content": str}
          or {"type": "tool_call", "name": str, "args": dict}
     """
-    provider = config.LLM_PROVIDER
-    model = config.get_model()
+    client = Cerebras(api_key=config.CEREBRAS_API_KEY)
 
-    if provider == "gemini":
-        return _call_gemini(messages, tools, model)
-    elif provider == "openai":
-        return _call_openai(messages, tools, model)
-    elif provider == "anthropic":
-        return _call_anthropic(messages, tools, model)
-    else:
-        return {"type": "text", "content": "LLM provider not configured."}
+    # Trim history to stay within context window
+    trimmed = _trim_messages(messages)
 
-
-def _call_gemini(messages: list[dict], tools: list[dict], model: str) -> dict:
-    import google.generativeai as genai
-    genai.configure(api_key=config.LLM_API_KEY)
-
-    # Build Gemini contents from message history (skip system messages)
-    contents = []
-    for m in messages:
+    # Build message list with system prompt prepended.
+    # OpenAI-compatible providers (Cerebras) require assistant messages that
+    # include tool_calls, each followed by a tool message with matching tool_call_id.
+    llm_messages = [{"role": "system", "content": build_system_prompt()}]
+    for m in trimmed:
         role = m["role"]
-        content = m["content"]
-        if role == "system":
-            continue
-        elif role == "user":
-            contents.append({"role": "user", "parts": [{"text": content}]})
+        if role == "tool":
+            tcid = m.get("tool_call_id")
+            if tcid:
+                llm_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "content": m.get("content") or "",
+                })
+            else:
+                # Legacy history (before proper tool IDs)
+                llm_messages.append({
+                    "role": "user",
+                    "content": f"[Tool result]: {m.get('content', '')}",
+                })
         elif role == "assistant":
-            contents.append({"role": "model", "parts": [{"text": content}]})
-        elif role == "tool":
-            contents.append({"role": "user", "parts": [{"text": f"[Tool result]: {content}"}]})
+            entry: dict = {"role": "assistant"}
+            if m.get("tool_calls"):
+                entry["tool_calls"] = m["tool_calls"]
+                entry["content"] = m.get("content") if m.get("content") else ""
+            else:
+                entry["content"] = m.get("content") or ""
+            llm_messages.append(entry)
+        elif role == "user":
+            llm_messages.append({"role": "user", "content": m.get("content", "")})
 
-    gemini_tools = _tools_for_gemini(tools) if tools else None
-    system_prompt = build_system_prompt()
-
-    llm = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=system_prompt,
-        tools=gemini_tools,
-    )
-    response = llm.generate_content(contents)
-
-    # Check for function call
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "function_call") and part.function_call.name:
-            fc = part.function_call
-            args = dict(fc.args) if fc.args else {}
-            return {"type": "tool_call", "name": fc.name, "args": args}
-
-    # Plain text response
-    return {"type": "text", "content": response.text}
-
-
-def _call_openai(messages: list[dict], tools: list[dict], model: str) -> dict:
-    from openai import OpenAI
-    client = OpenAI(api_key=config.LLM_API_KEY)
-
-    # Prepend system message
-    oai_messages = [{"role": "system", "content": build_system_prompt()}]
-    for m in messages:
-        if m["role"] == "system":
-            continue
-        oai_messages.append({"role": m["role"], "content": m["content"]})
-
-    oai_tools = _tools_for_openai(tools) if tools else None
-    kwargs = {"model": model, "messages": oai_messages}
-    if oai_tools:
-        kwargs["tools"] = oai_tools
+    cerebras_tools = _tools_for_cerebras(tools) if tools else None
+    kwargs = {
+        "model": config.get_model(),
+        "messages": llm_messages,
+    }
+    if cerebras_tools:
+        kwargs["tools"] = cerebras_tools
         kwargs["tool_choice"] = "auto"
 
     response = client.chat.completions.create(**kwargs)
@@ -185,42 +255,53 @@ def _call_openai(messages: list[dict], tools: list[dict], model: str) -> dict:
         args = json.loads(tc.function.arguments) if tc.function.arguments else {}
         return {"type": "tool_call", "name": tc.function.name, "args": args}
 
-    return {"type": "text", "content": choice.content or ""}
+    content = choice.content or ""
+
+    # Fallback: model sometimes emits tool calls as JSON text instead of tool_calls.
+    tc = _parse_tool_call_from_text(content)
+    if tc:
+        return tc
+
+    return {"type": "text", "content": content}
 
 
-def _call_anthropic(messages: list[dict], tools: list[dict], model: str) -> dict:
-    import anthropic
-    client = anthropic.Anthropic(api_key=config.LLM_API_KEY)
+def _parse_tool_call_from_text(content: str) -> dict | None:
+    """
+    If content looks like a JSON tool invocation, return
+    {"type": "tool_call", "name": str, "args": dict}; else None.
 
-    anth_messages = []
-    for m in messages:
-        if m["role"] == "system":
-            continue
-        role = "assistant" if m["role"] == "assistant" else "user"
-        anth_messages.append({"role": role, "content": m["content"]})
+    Uses raw_decode so only the *first* JSON value is parsed — duplicate or
+    trailing JSON blobs (common model mistake) no longer break parsing.
+    """
+    stripped = _normalize_json_quotes_for_parse(content.strip())
+    if stripped.startswith("```"):
+        parts = stripped.split("```")
+        stripped = parts[1] if len(parts) > 1 else stripped
+        if stripped.lstrip().startswith("json"):
+            stripped = stripped.lstrip()[4:]
+        stripped = stripped.strip()
 
-    anth_tools = _tools_for_anthropic(tools) if tools else None
-    kwargs = {
-        "model": model,
-        "max_tokens": 1024,
-        "system": build_system_prompt(),
-        "messages": anth_messages,
-    }
-    if anth_tools:
-        kwargs["tools"] = anth_tools
+    start = stripped.find("{")
+    if start < 0:
+        return None
 
-    response = client.messages.create(**kwargs)
+    decoder = json.JSONDecoder()
+    try:
+        parsed, _end = decoder.raw_decode(stripped[start:])
+    except json.JSONDecodeError:
+        return None
 
-    for block in response.content:
-        if block.type == "tool_use":
-            return {"type": "tool_call", "name": block.name, "args": block.input or {}}
-
-    text = " ".join(b.text for b in response.content if hasattr(b, "text"))
-    return {"type": "text", "content": text}
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name") or parsed.get("function")
+    arguments = parsed.get("arguments") or parsed.get("parameters") or {}
+    if name and isinstance(arguments, dict):
+        return {"type": "tool_call", "name": name, "args": arguments}
+    return None
 
 
 # ---------------------------------------------------------------------------
-# 2.4  check_auth_gate
+# check_auth_gate
 # ---------------------------------------------------------------------------
 def check_auth_gate(tool_name: str) -> str | None:
     """
@@ -236,21 +317,18 @@ def check_auth_gate(tool_name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 2.5  chat_handler
+# chat_handler
 # ---------------------------------------------------------------------------
 def chat_handler(user_message: str) -> str:
-    """
-    Main chat handler: appends user message, runs LLM tool loop, returns response.
-    """
+    """Main handler: appends user message, runs LLM tool loop, returns response."""
     try:
-        # Append user message to history
         st.session_state.messages.append({"role": "user", "content": user_message})
 
         tools = st.session_state.get("tools", [])
         discovered_names = {t["name"] for t in tools}
 
-        # LLM loop — max 5 iterations to prevent runaway tool calls
-        for _ in range(5):
+        # LLM loop — max 8 iterations (auth flows: get_customer + verify + reply)
+        for _ in range(8):
             result = call_llm(st.session_state.messages, tools)
 
             if result["type"] == "text":
@@ -262,37 +340,77 @@ def chat_handler(user_message: str) -> str:
             tool_name = result["name"]
             tool_args = result["args"]
 
-            # Auth gate check
+            # Auth gate
             gate_msg = check_auth_gate(tool_name)
             if gate_msg:
                 st.session_state.messages.append({"role": "assistant", "content": gate_msg})
                 return gate_msg
 
-            # Inline name validation — safety net beyond LLM's native schema filtering
+            # Inline name validation — safety net
             if tool_name not in discovered_names:
                 print(f"[INVALID TOOL] {tool_name} not in discovered tools", file=sys.stderr)
                 msg = "I'm not able to perform that action. How else can I help you?"
                 st.session_state.messages.append({"role": "assistant", "content": msg})
                 return msg
 
-            # Execute the tool
+            # Block template / hallucinated credentials (common model mistake)
+            if tool_name == "verify_customer_pin" and _verify_pin_args_are_placeholders(
+                tool_args
+            ):
+                print(
+                    "[AUTH] blocked verify_customer_pin — placeholder or empty args",
+                    file=sys.stderr,
+                )
+                msg = _auth_placeholder_reply()
+                st.session_state.messages.append({"role": "assistant", "content": msg})
+                return msg
+
+            # Record assistant tool call (required for OpenAI-compatible tool chains)
+            tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(tool_args) if tool_args else "{}",
+                        },
+                    }
+                ],
+            })
+
+            # Execute tool
             success, tool_result = mcp_client.call_tool(tool_name, tool_args)
 
-            # Handle successful auth — update session state
+            # Update auth state on successful verify_customer_pin
             if tool_name == "verify_customer_pin" and success:
                 st.session_state.authenticated = True
+                cid = tool_args.get("customer_id") or tool_args.get("email")
+                if cid:
+                    st.session_state.customer_id = str(cid)
 
-            # Append tool result to history so LLM can synthesise a response
             tool_content = tool_result if success else f"[Tool error]: {tool_result}"
-            st.session_state.messages.append({"role": "tool", "content": tool_content})
+            # Truncate large tool results to avoid context overflow
+            if len(tool_content) > 1500:
+                tool_content = tool_content[:1500] + "... [truncated]"
+            st.session_state.messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": tool_content,
+            })
 
-            # If tool failed, return the friendly error immediately
             if not success:
                 st.session_state.messages.append({"role": "assistant", "content": tool_result})
                 return tool_result
 
-        # Fallback if loop exhausted without a text response
-        fallback = "I'm having trouble completing that request. Please try again."
+        fallback = (
+            "I'm having trouble completing that request — the conversation hit an "
+            "internal step limit. Please try again; for sign-in, share your customer "
+            "ID (or email) and PIN in one message so I can verify you in fewer steps."
+        )
         st.session_state.messages.append({"role": "assistant", "content": fallback})
         return fallback
 
@@ -307,10 +425,160 @@ def chat_handler(user_message: str) -> str:
 st.set_page_config(
     page_title="Meridian Electronics Support",
     page_icon="🖥️",
-    layout="centered",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# Validate config — show clear error and stop if env vars are missing
+# ---------------------------------------------------------------------------
+# Custom CSS — dark tech theme with brand accent
+# ---------------------------------------------------------------------------
+st.markdown("""
+<style>
+/* ── Global ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
+
+/* ── Background ── */
+.stApp {
+    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+    min-height: 100vh;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
+    border-right: 1px solid #30363d;
+}
+[data-testid="stSidebar"] .stMarkdown h1,
+[data-testid="stSidebar"] .stMarkdown h2,
+[data-testid="stSidebar"] .stMarkdown h3 {
+    color: #58a6ff;
+}
+
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    background: rgba(22, 27, 34, 0.8) !important;
+    border: 1px solid #30363d;
+    border-radius: 12px !important;
+    margin-bottom: 8px;
+    backdrop-filter: blur(10px);
+}
+
+/* ── User message accent ── */
+[data-testid="stChatMessage"][data-testid*="user"] {
+    border-left: 3px solid #58a6ff;
+}
+
+/* ── Chat input ── */
+[data-testid="stChatInput"] {
+    background: rgba(22, 27, 34, 0.9) !important;
+    border: 1px solid #30363d !important;
+    border-radius: 12px !important;
+    color: #e6edf3 !important;
+}
+[data-testid="stChatInput"]:focus-within {
+    border-color: #58a6ff !important;
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15) !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    background: linear-gradient(135deg, #1f6feb 0%, #388bfd 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    width: 100%;
+    padding: 0.5rem 1rem;
+}
+.stButton > button:hover {
+    background: linear-gradient(135deg, #388bfd 0%, #58a6ff 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(88, 166, 255, 0.3);
+}
+
+/* ── Metric cards ── */
+[data-testid="stMetric"] {
+    background: rgba(22, 27, 34, 0.8);
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 1rem;
+}
+[data-testid="stMetricValue"] { color: #58a6ff; }
+[data-testid="stMetricLabel"] { color: #8b949e; }
+
+/* ── Status badges ── */
+.stSuccess { border-radius: 8px; }
+.stError   { border-radius: 8px; }
+.stInfo    { border-radius: 8px; }
+
+/* ── Divider ── */
+hr { border-color: #30363d; }
+
+/* ── Text colours ── */
+.stMarkdown, p, li { color: #e6edf3; }
+h1, h2, h3 { color: #f0f6fc; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0d1117; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #58a6ff; }
+
+/* ── Hero banner ── */
+.hero-banner {
+    background: linear-gradient(135deg, #1f6feb22 0%, #388bfd11 100%);
+    border: 1px solid #1f6feb44;
+    border-radius: 16px;
+    padding: 1.5rem 2rem;
+    margin-bottom: 1.5rem;
+    text-align: center;
+}
+.hero-title {
+    font-size: 2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #58a6ff, #79c0ff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin: 0;
+}
+.hero-subtitle {
+    color: #8b949e;
+    font-size: 0.95rem;
+    margin-top: 0.4rem;
+}
+
+/* ── Quick action chips ── */
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 1rem 0;
+}
+.chip {
+    background: rgba(31, 111, 235, 0.15);
+    border: 1px solid #1f6feb44;
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 0.82rem;
+    color: #58a6ff;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.chip:hover {
+    background: rgba(31, 111, 235, 0.3);
+    border-color: #58a6ff;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
 try:
     config.validate()
 except ValueError as e:
@@ -320,37 +588,122 @@ except ValueError as e:
 
 init_session()
 
-# Header
-st.title("🖥️ Meridian Electronics Support")
-st.caption(
-    "I can help you check product availability, place orders, "
-    "and look up your order history."
-)
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("## 🖥️ Meridian Electronics")
+    st.markdown("*AI-Powered Customer Support*")
+    st.divider()
 
-# Auth status badge
-if st.session_state.authenticated:
-    st.success(f"✅ Authenticated — Customer {st.session_state.customer_id or ''}", icon=None)
+    # Auth status
+    if st.session_state.authenticated:
+        st.success(f"🔓 Signed in as **{st.session_state.customer_id or 'Customer'}**")
+    else:
+        st.info("🔒 Not authenticated\nSign in to view orders.")
 
-st.divider()
+    st.divider()
 
-# MCP unavailable banner
-if not st.session_state.mcp_available:
-    st.error(
-        "⚠️ Support services are temporarily unavailable. Please try again later."
+    # Quick actions
+    st.markdown("### ⚡ Quick Actions")
+    quick_actions = [
+        ("🔍 Browse Products",    "Show me all available products"),
+        ("📦 Check Stock",        "What monitors do you have in stock?"),
+        ("🛒 Place an Order",     "I'd like to place an order"),
+        ("📋 My Orders",          "Show me my order history"),
+        ("🔐 Sign In",            "I want to authenticate my account"),
+    ]
+    for label, prompt_text in quick_actions:
+        if st.button(label, key=f"qa_{label}"):
+            st.session_state["_quick_action"] = prompt_text
+            st.rerun()
+
+    st.divider()
+
+    # Stats
+    st.markdown("### 📊 Session Info")
+    msg_count = len([m for m in st.session_state.messages if m["role"] == "user"])
+    tool_count = len([m for m in st.session_state.messages if m["role"] == "tool"])
+    col1, col2 = st.columns(2)
+    col1.metric("Messages", msg_count)
+    col2.metric("Tool Calls", tool_count)
+
+    st.divider()
+
+    # Clear chat
+    if st.button("🗑️ Clear Conversation", key="clear"):
+        st.session_state.messages = []
+        st.session_state.authenticated = False
+        st.session_state.customer_id = None
+        st.rerun()
+
+    st.divider()
+    st.markdown(
+        "<div style='color:#8b949e;font-size:0.75rem;text-align:center'>"
+        "Powered by Cerebras · MCP · Streamlit"
+        "</div>",
+        unsafe_allow_html=True,
     )
+
+# ---------------------------------------------------------------------------
+# Main area
+# ---------------------------------------------------------------------------
+if not st.session_state.mcp_available:
+    st.error("⚠️ Support services are temporarily unavailable. Please try again later.")
     st.stop()
 
-# Render conversation history
+# Hero banner
+st.markdown("""
+<div class="hero-banner">
+    <p class="hero-title">🖥️ Meridian Electronics Support</p>
+    <p class="hero-subtitle">
+        Check product availability · Place orders · Track your order history
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+# Welcome message on first load
+if not st.session_state.messages:
+    st.markdown("""
+<div class="chip-row">
+    <span class="chip">🔍 Browse products</span>
+    <span class="chip">📦 Check stock</span>
+    <span class="chip">🛒 Place an order</span>
+    <span class="chip">📋 Order history</span>
+    <span class="chip">🔐 Sign in</span>
+</div>
+""", unsafe_allow_html=True)
+
+# Render conversation history (skip tool rows; skip assistant rows that are only tool_calls)
 for msg in st.session_state.messages:
-    if msg["role"] in ("user", "assistant"):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    if msg["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(msg.get("content") or "")
+    elif msg["role"] == "assistant":
+        body = msg.get("content")
+        if body:
+            with st.chat_message("assistant"):
+                st.markdown(body)
+
+# Handle quick action injection
+if "_quick_action" in st.session_state:
+    injected = st.session_state.pop("_quick_action")
+    with st.chat_message("user"):
+        st.markdown(injected)
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
+                response = chat_handler(injected)
+            except Exception as e:
+                print(f"[APP ERROR] {e}", file=sys.stderr)
+                response = "Something went wrong. Please refresh and try again."
+        st.markdown(response)
+    st.rerun()
 
 # Chat input
-if prompt := st.chat_input("How can I help you today?"):
+if prompt := st.chat_input("Ask me anything about Meridian Electronics..."):
     with st.chat_message("user"):
         st.markdown(prompt)
-
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
@@ -359,3 +712,4 @@ if prompt := st.chat_input("How can I help you today?"):
                 print(f"[APP ERROR] {e}", file=sys.stderr)
                 response = "Something went wrong. Please refresh and try again."
         st.markdown(response)
+
