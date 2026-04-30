@@ -8,26 +8,26 @@
 
 - [ ] 1. Phase 1 — Project setup and configuration (0–30 min)
 
-  - [ ] 1.1 Scaffold project structure
+  - [x] 1.1 Scaffold project structure
     - Create `requirements.txt` with: `mcp`, `streamlit`, `python-dotenv`, `google-generativeai` (or `openai` / `anthropic`)
     - Create `.env.example` with placeholder values for `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `MCP_SERVER_URL`
     - Create empty files: `config.py`, `mcp_client.py`, `app.py`
     - _Requirements: 9.2_
 
-  - [ ] 1.2 Implement `config.py`
+  - [x] 1.2 Implement `config.py`
     - Use `python-dotenv` to load `.env` at import time
     - Expose `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `MCP_SERVER_URL` as module-level constants
     - For each required key (`LLM_PROVIDER`, `LLM_API_KEY`): raise `ValueError(f"Missing required env var: {key}")` if absent
     - Default `LLM_MODEL` to the provider's flash/mini tier; default `MCP_SERVER_URL` to the Cloud Run endpoint
     - _Requirements: 9.1, 9.3_
 
-  - [ ] 1.3 Implement `mcp_client.py` — `connect()`
+  - [x] 1.3 Implement `mcp_client.py` — `connect()`
     - Use the `mcp` Python SDK with `StreamableHTTPClientTransport` to connect to `MCP_SERVER_URL`
     - Call `session.list_tools()`, print each tool name to stdout, return the list as plain dicts `{name, description, inputSchema}`
     - On any exception: print `[MCP ERROR] connect failed: {e}` to stderr, return empty list
     - _Requirements: 2.1, 2.2, 2.4_
 
-  - [ ] 1.4 Implement `mcp_client.py` — `call_tool()`
+  - [x] 1.4 Implement `mcp_client.py` — `call_tool()`
     - Signature: `def call_tool(name: str, args: dict) -> tuple[bool, str]`
     - On success: return `(True, result_text)`
     - On any exception: print `[MCP ERROR] tool={name} error={e}` to stderr, return `(False, "I couldn't complete that request. Please try again.")`
