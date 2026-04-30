@@ -33,31 +33,31 @@
     - On any exception: print `[MCP ERROR] tool={name} error={e}` to stderr, return `(False, "I couldn't complete that request. Please try again.")`
     - _Requirements: 2.5, 8.1, 8.2_
 
-- [ ] 2. Phase 2 — LLM integration and core orchestration (30–90 min)
+- [x] 2. Phase 2 — LLM integration and core orchestration (30–90 min)
 
-  - [ ] 2.1 Implement `init_session()` in `app.py`
+  - [x] 2.1 Implement `init_session()` in `app.py`
     - Initialise `st.session_state.messages = []`, `st.session_state.authenticated = False`, `st.session_state.customer_id = None`
     - On first run: call `mcp_client.connect()`, store result in `st.session_state.tools` and set `st.session_state.mcp_available`
     - _Requirements: 2.3, 3.2_
 
-  - [ ] 2.2 Implement `build_system_prompt()` in `app.py`
+  - [x] 2.2 Implement `build_system_prompt()` in `app.py`
     - Return a system prompt string that: identifies the assistant as Meridian Electronics support, lists the four supported workflows (auth, availability, order, history), instructs the LLM to call `authenticate` before returning account data, and instructs it to confirm order details before placing an order
     - _Requirements: 7.2_
 
-  - [ ] 2.3 Implement `call_llm()` in `app.py`
+  - [x] 2.3 Implement `call_llm()` in `app.py`
     - Signature: `def call_llm(messages: list[dict], tools: list[dict]) -> dict`
     - Build the LLM request synchronously using the provider SDK selected by `config.LLM_PROVIDER`
     - Pass `tools` as the function/tool schema list so the LLM's native function-calling API constrains proposals to discovered tools
     - Return `{"type": "text", "content": str}` or `{"type": "tool_call", "name": str, "args": dict}`
     - _Requirements: 7.1, 7.3, 7.4_
 
-  - [ ] 2.4 Implement `check_auth_gate()` in `app.py`
+  - [x] 2.4 Implement `check_auth_gate()` in `app.py`
     - Signature: `def check_auth_gate(tool_name: str) -> str | None`
     - If `tool_name` is an account-data tool (e.g. `get_order_history`) and `st.session_state.authenticated` is `False`: return `"Please authenticate first. What is your customer ID and password?"`
     - Otherwise return `None`
     - _Requirements: 3.3, 6.3_
 
-  - [ ] 2.5 Implement `chat_handler()` in `app.py`
+  - [x] 2.5 Implement `chat_handler()` in `app.py`
     - Append user message to `st.session_state.messages`
     - Run LLM loop (max 5 iterations):
       - Call `call_llm(messages, tools)`
