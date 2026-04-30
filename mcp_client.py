@@ -7,6 +7,29 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.session import ClientSession
 import config
 
+
+def _schema_dict(tool) -> dict:
+    if not tool.inputSchema:
+        return {}
+    if isinstance(tool.inputSchema, dict):
+        return tool.inputSchema
+    return tool.inputSchema.model_dump()
+
+
+def _content_text(result) -> str:
+    if not result.content:
+        return ""
+    parts = []
+    for item in result.content:
+        if hasattr(item, "text"):
+            parts.append(item.text)
+        elif hasattr(item, "model_dump"):
+            parts.append(json.dumps(item.model_dump()))
+        else:
+            parts.append(str(item))
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Run async code safely from a sync context (works inside Streamlit's loop)
 # ---------------------------------------------------------------------------
@@ -59,17 +82,10 @@ async def _connect_async() -> list[dict]:
             result = await session.list_tools()
             tools = []
             for tool in result.tools:
-                schema = {}
-                if tool.inputSchema:
-                    schema = (
-                        tool.inputSchema
-                        if isinstance(tool.inputSchema, dict)
-                        else tool.inputSchema.model_dump()
-                    )
                 tools.append({
                     "name": tool.name,
                     "description": tool.description or "",
-                    "inputSchema": schema,
+                    "inputSchema": _schema_dict(tool),
                 })
                 print(f"[MCP] Discovered tool: {tool.name}")
             return tools
@@ -97,14 +113,4 @@ async def _call_tool_async(name: str, args: dict) -> str:
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, args)
-            if result.content:
-                parts = []
-                for item in result.content:
-                    if hasattr(item, "text"):
-                        parts.append(item.text)
-                    elif hasattr(item, "model_dump"):
-                        parts.append(json.dumps(item.model_dump()))
-                    else:
-                        parts.append(str(item))
-                return "\n".join(parts)
-            return ""
+            return _content_text(result)

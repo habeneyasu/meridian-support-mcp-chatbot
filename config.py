@@ -1,5 +1,6 @@
 # config.py — load and validate environment variables at import time
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +19,7 @@ MCP_SERVER_URL: str = os.getenv(
 def validate():
     """Validate required env vars. Raises ValueError with the missing key name."""
     if not CEREBRAS_API_KEY:
+        print("Missing required env var: CEREBRAS_API_KEY", file=sys.stderr)
         raise ValueError("Missing required env var: CEREBRAS_API_KEY")
 
 

@@ -1,4 +1,5 @@
 # app.py — Streamlit UI, LLM orchestration, chat handler
+import os
 import sys
 import json
 import re
@@ -110,57 +111,29 @@ def init_session():
 # build_system_prompt
 # ---------------------------------------------------------------------------
 def build_system_prompt() -> str:
-    return """You are a helpful customer support assistant for Meridian Electronics, \
-a company that sells computer products including monitors, keyboards, printers, \
-networking gear, and accessories.
+    return """You are Meridian Electronics customer support (monitors, keyboards, \
+printers, networking gear, accessories). Use only the tools provided in this API \
+call (schemas define names and arguments). The customer must never hear tool names, \
+JSON, or \"I will call…\"; speak like a human agent.
 
-You have backend tools for your own use. The customer must never hear tool names, \
-function names, JSON, or phrases like \"I will call the … tool\" — speak only as a \
-human support agent. Use tools proactively where appropriate:
-- list_products(category): list products, optionally filtered by category
-- get_product(sku): get details for a specific product by SKU
-- search_products(query): search products by name or keyword
-- get_customer(customer_id): look up a customer account
-- verify_customer_pin(email, pin): authenticate — only after the customer gives \
-real values; never use placeholders like \"your email\" or \"your pin\"
-- list_orders(customer_id): list orders for an authenticated customer
-- get_order(order_id): get details of a specific order
-- create_order(customer_id, items): place a new order
+Products/stock: call search_products or list_products without unnecessary delay; \
+show name, SKU, price, and stock. If the product is unclear, ask once, then search.
 
-Behaviour rules:
-1. When a customer asks about products or stock, IMMEDIATELY call the appropriate \
-tool (list_products or search_products). Do NOT ask clarifying questions first — \
-just call the tool and present the results.
-2. When you receive a [Tool result], present the data directly and clearly. \
-Never ask the customer to repeat their question after receiving a tool result.
-3. For product listings, show: name, SKU, price, and stock quantity.
-4. For order history, show: order ID, date, items, and status.
-5. Before accessing account data (orders), call verify_customer_pin first. \
-If already authenticated in this session, skip re-authentication. For sign-in \
-requests, ask for customer ID (or email, if the tools use email) and PIN before \
-calling tools — do not guess IDs. Never call verify_customer_pin until the \
-customer has provided their actual email and PIN in the conversation. After each \
-tool result, respond in plain language; do not answer with only another tool call \
-or with raw JSON meant for tools.
-6. Before placing an order with create_order, collect a clear product identifier \
-(SKU preferred, or a specific product name the catalogue can resolve) and quantity. \
-Confirm SKU, quantity, and price with the customer and wait for explicit confirmation \
-before submitting. Never assume a product category the customer did not mention \
-(e.g. do not ask about a \"monitor\" unless they said monitor or display).
-7. Stay within Meridian Electronics product and order support scope.
-8. Be concise, friendly, and professional.
-9. Sign-in and account help: ask in plain language only — for example: \"To verify \
-it's you, please send the **email** on your Meridian account and your **account \
-PIN**.\" Never say you are calling a tool, invoking an API, or using JSON; never \
-quote verify_customer_pin, get_customer, or any other technical identifier aloud.
-10. Demo / test accounts for this environment use emails ending in @example.net, \
-@example.com, or @example.org with a numeric PIN (often four digits). When the \
-customer provides such an email and PIN in conversation, treat them as real \
-credentials and complete verification — do not reject them as placeholders.
-11. Vague order requests (e.g. \"I'd like to place an order\" with no item): reply \
-in neutral language — ask what they want to buy (product name or SKU) and how many. \
-If they only give a category or vague description, use search_products or \
-list_products to show options, then narrow to one SKU before create_order."""
+Auth and orders: verify identity before sharing order/account details; ask for the \
+email on file and PIN in plain language. Accept @example.net / .com / .org addresses \
+with a 4–8 digit PIN when the customer supplies them (demo data). Never use \
+placeholder credentials.
+
+After each tool result, answer in natural language (no tool-only loops, no raw JSON).
+
+Orders: get SKU (or a uniquely identifiable product) and quantity; confirm before \
+submitting. Do not assume a category (e.g. monitor) unless the customer said it. \
+If they only say they want to order, ask what item and how many or search the \
+catalogue.
+
+Order history: present order id, date, items, and status when listing.
+
+Stay on-topic; be concise and professional."""
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +283,8 @@ def check_auth_gate(tool_name: str) -> str | None:
     """
     if tool_name in AUTH_REQUIRED_TOOLS and not st.session_state.authenticated:
         return (
-            "I need to verify your identity before I can access your orders. "
-            "Could you please provide your customer ID?"
+            "I need to verify your identity before I can show orders. "
+            "Please share the email on your Meridian account and your PIN."
         )
     return None
 
@@ -419,6 +392,16 @@ def chat_handler(user_message: str) -> str:
         return "Something went wrong. Please try again."
 
 
+def _run_chat_handler_safe(prompt: str) -> str:
+    """Run chat_handler; on failure log, show st.error, return a safe message."""
+    try:
+        return chat_handler(prompt)
+    except Exception as e:
+        print(f"[APP ERROR] {e}", file=sys.stderr)
+        st.error("Something went wrong. Please refresh and try again.")
+        return "Something went wrong. Please try again."
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -434,45 +417,25 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-/* ── Global ── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-}
-
-/* ── Background ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp {
     background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
     min-height: 100vh;
 }
-
-/* ── Sidebar ── */
 [data-testid="stSidebar"] {
     background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
     border-right: 1px solid #30363d;
 }
-[data-testid="stSidebar"] .stMarkdown h1,
-[data-testid="stSidebar"] .stMarkdown h2,
-[data-testid="stSidebar"] .stMarkdown h3 {
-    color: #58a6ff;
-}
-
-/* ── Chat messages ── */
+[data-testid="stSidebar"] .stMarkdown h1, [data-testid="stSidebar"] .stMarkdown h2,
+[data-testid="stSidebar"] .stMarkdown h3 { color: #58a6ff; }
 [data-testid="stChatMessage"] {
-    background: rgba(22, 27, 34, 0.8) !important;
+    background: rgba(22, 27, 34, 0.85) !important;
     border: 1px solid #30363d;
     border-radius: 12px !important;
     margin-bottom: 8px;
-    backdrop-filter: blur(10px);
 }
-
-/* ── User message accent ── */
-[data-testid="stChatMessage"][data-testid*="user"] {
-    border-left: 3px solid #58a6ff;
-}
-
-/* ── Chat input ── */
+[data-testid="stChatMessage"][data-testid*="user"] { border-left: 3px solid #58a6ff; }
 [data-testid="stChatInput"] {
     background: rgba(22, 27, 34, 0.9) !important;
     border: 1px solid #30363d !important;
@@ -481,27 +444,17 @@ html, body, [class*="css"] {
 }
 [data-testid="stChatInput"]:focus-within {
     border-color: #58a6ff !important;
-    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15) !important;
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.12) !important;
 }
-
-/* ── Buttons ── */
 .stButton > button {
     background: linear-gradient(135deg, #1f6feb 0%, #388bfd 100%);
     color: white;
     border: none;
     border-radius: 8px;
     font-weight: 500;
-    transition: all 0.2s ease;
     width: 100%;
     padding: 0.5rem 1rem;
 }
-.stButton > button:hover {
-    background: linear-gradient(135deg, #388bfd 0%, #58a6ff 100%);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(88, 166, 255, 0.3);
-}
-
-/* ── Metric cards ── */
 [data-testid="stMetric"] {
     background: rgba(22, 27, 34, 0.8);
     border: 1px solid #30363d;
@@ -510,26 +463,10 @@ html, body, [class*="css"] {
 }
 [data-testid="stMetricValue"] { color: #58a6ff; }
 [data-testid="stMetricLabel"] { color: #8b949e; }
-
-/* ── Status badges ── */
-.stSuccess { border-radius: 8px; }
-.stError   { border-radius: 8px; }
-.stInfo    { border-radius: 8px; }
-
-/* ── Divider ── */
+.stSuccess, .stError, .stInfo { border-radius: 8px; }
 hr { border-color: #30363d; }
-
-/* ── Text colours ── */
 .stMarkdown, p, li { color: #e6edf3; }
 h1, h2, h3 { color: #f0f6fc; }
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #0d1117; }
-::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #58a6ff; }
-
-/* ── Hero banner ── */
 .hero-banner {
     background: linear-gradient(135deg, #1f6feb22 0%, #388bfd11 100%);
     border: 1px solid #1f6feb44;
@@ -546,19 +483,8 @@ h1, h2, h3 { color: #f0f6fc; }
     -webkit-text-fill-color: transparent;
     margin: 0;
 }
-.hero-subtitle {
-    color: #8b949e;
-    font-size: 0.95rem;
-    margin-top: 0.4rem;
-}
-
-/* ── Quick action chips ── */
-.chip-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 1rem 0;
-}
+.hero-subtitle { color: #8b949e; font-size: 0.95rem; margin-top: 0.4rem; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 1rem 0; }
 .chip {
     background: rgba(31, 111, 235, 0.15);
     border: 1px solid #1f6feb44;
@@ -566,12 +492,6 @@ h1, h2, h3 { color: #f0f6fc; }
     padding: 4px 14px;
     font-size: 0.82rem;
     color: #58a6ff;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-.chip:hover {
-    background: rgba(31, 111, 235, 0.3);
-    border-color: #58a6ff;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -582,8 +502,21 @@ h1, h2, h3 { color: #f0f6fc; }
 try:
     config.validate()
 except ValueError as e:
-    st.error(f"⚠️ Configuration error: {e}")
-    st.info("Copy `.env.example` to `.env`, fill in your credentials, and restart.")
+    st.error(f"Configuration error: {e}")
+    if os.getenv("SPACE_ID"):
+        st.info(
+            "This Space needs a **secret** named exactly `CEREBRAS_API_KEY`. "
+            "Open **Settings → Variables and secrets → New secret**, add it, "
+            "then **Factory reboot** (or push a new commit) so the app restarts."
+        )
+        st.markdown(
+            f"[Open this Space’s settings](https://huggingface.co/spaces/{os.getenv('SPACE_ID')}/settings)"
+        )
+    else:
+        st.info(
+            "Copy `.env.example` to `.env`, set `CEREBRAS_API_KEY`, and run again "
+            "(or pass `-e CEREBRAS_API_KEY=...` with Docker)."
+        )
     st.stop()
 
 init_session()
@@ -692,24 +625,15 @@ if "_quick_action" in st.session_state:
         st.markdown(injected)
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            try:
-                response = chat_handler(injected)
-            except Exception as e:
-                print(f"[APP ERROR] {e}", file=sys.stderr)
-                response = "Something went wrong. Please refresh and try again."
+            response = _run_chat_handler_safe(injected)
         st.markdown(response)
     st.rerun()
 
-# Chat input
 if prompt := st.chat_input("Ask me anything about Meridian Electronics..."):
     with st.chat_message("user"):
         st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            try:
-                response = chat_handler(prompt)
-            except Exception as e:
-                print(f"[APP ERROR] {e}", file=sys.stderr)
-                response = "Something went wrong. Please refresh and try again."
+            response = _run_chat_handler_safe(prompt)
         st.markdown(response)
 
