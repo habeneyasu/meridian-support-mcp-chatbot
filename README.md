@@ -7,7 +7,7 @@ sdk: docker
 python_version: "3.11"
 app_file: app.py
 app_port: 8501
-short_description: "Meridian customer support — Streamlit, Cerebras LLM, MCP catalogue & orders"
+short_description: "Meridian support chatbot: Streamlit, Cerebras LLM, MCP"
 pinned: false
 ---
 
