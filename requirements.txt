@@ -1,6 +1,4 @@
 mcp[cli]
 streamlit
 python-dotenv
-google-generativeai
-openai
-anthropic
+cerebras-cloud-sdk
