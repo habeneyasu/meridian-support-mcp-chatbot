@@ -19,9 +19,9 @@ Streamlit UI + **Cerebras** LLM + remote **MCP** server for Meridian-style suppo
 
 | Home | Chat (sign-in & stock) |
 |------|-------------------------|
-| ![Home](docs/screenshots/default-home-page.png) | ![Login and stock](docs/screenshots/login-and-stock.png) |
+| ![Home](https://raw.githubusercontent.com/habeneyasu/meridian-support-mcp-chatbot/77545d6/docs/screenshots/default-home-page.png) | ![Login and stock](https://raw.githubusercontent.com/habeneyasu/meridian-support-mcp-chatbot/77545d6/docs/screenshots/login-and-stock.png) |
 
-*(Add another image under `docs/screenshots/` if you have a third screen.)*
+Screenshots are served from GitHub **raw** URLs so the Hugging Face Space git repo stays free of binary files ([HF policy](https://huggingface.co/docs/hub/xet)). To refresh images after UI changes, commit new PNGs on GitHub, then update these URLs (or point to `main` once merged).
 
 ## What it can do
 
